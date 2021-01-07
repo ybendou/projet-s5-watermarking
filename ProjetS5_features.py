@@ -1,23 +1,11 @@
 import numpy as np
 
 
-
-
-
-
-
-
 def average_dist_per_line(d) :
 #input: pytesseract dict
 #output: list of average distance between words for each lines
     words_per_line = words_in_lines()
     return [int(np.mean(interword_distances_line_i(i))) for i in range(len(words_per_line))]
-
-
-
-
-
-
 
 def words_in_lines(d) :
 #input: pytesseract dict
@@ -32,8 +20,6 @@ def words_in_lines(d) :
             words_per_line[l] += 1
         return words_per_line
 
-
-
 def margin_distance(d,i,left,words_per_lines) :
 #input: pytesseract dict, line number and left = boolean, if it's false we're looking for the right margin
 #output: margin size
@@ -45,8 +31,6 @@ def margin_distance(d,i,left,words_per_lines) :
     start = int(np.sum(words_per_line[:i])) + a*next
 
     return d['left'][start] #TODO Write something for the right margin
-
-
 
 def interword_distances_line_i(d,i,words_per_line) :
 #input: pytesseract dict,the line number and a list of the number of words per line
@@ -68,8 +52,6 @@ def interword_distances_line_i(d,i,words_per_line) :
         dist[i] = x2 - x - w
     return dist
 
-
-
 def line_position(d,i,words_per_line) :
 #input: pytesseract dict,the line number and a list of the number of words per line
 #output: position of a line computed manually
@@ -82,7 +64,6 @@ def line_position(d,i,words_per_line) :
         pos[i] = y
         #pos[i] = (y+h)/2
     return np.mean(pos)
-
 
 def line_distance(d,i,j,words_per_lines) :
 #input: pytesseract dict,the two line numbers and a list of the number of words per line
