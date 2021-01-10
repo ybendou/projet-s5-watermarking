@@ -1,4 +1,3 @@
-
 import cv2 
 import numpy as np
 from skimage import io
@@ -7,7 +6,8 @@ from skimage.color import rgb2gray
 from deskew import determine_skew
 from sklearn.ensemble import IsolationForest
 from sklearn.linear_model import RANSACRegressor
-
+import pandas as pd 
+from sklearn.cluster import DBSCAN
 import pytesseract
 
 class Preprocess():
@@ -23,7 +23,6 @@ class Preprocess():
         """
         rgb_planes = cv2.split(img) # split RGB colors 
         result_planes = []
-        result_norm_planes = []
         for plane in rgb_planes:
             dilated_img = cv2.dilate(plane, np.ones((7,7), np.uint8)) # dilation
             bg_img = cv2.medianBlur(dilated_img, 21) # median bluring
@@ -57,13 +56,13 @@ class Preprocess():
                             min_line_length, max_line_gap)
         return lines
     
-    def deskew(self,img):
-        grayscale = rgb2gray(img)
-        angle = determine_skew(grayscale)
-        rotated = rotate(img, angle, resize=True) * 255
-        print(f'Deskew angle : {np.round(angle,2)}')
-        return angle,rotated.astype(np.uint8)
-    
+    def deskew(self,_img,principal_angle=11.25):
+        grayscale = rgb2gray(_img)
+        angle = principal_angle + determine_skew(grayscale)
+        rotated = rotate(_img, angle, resize=True) * 255
+        print(-angle)
+        return -principal_angle,rotated.astype(np.uint8)
+        
     def filter_hough_lines(self,lines,edges):
         """
         Detect Probabilistic Hough lines and drop lines with a small prjection on the x axis 
@@ -113,28 +112,27 @@ class Preprocess():
         return rot_angles
 
     # filtering and only keeping lines with the same angle
-    def filter_lines(self,lines,rot_angles,angle_desk):
-        thresh = 5
+    def filter_lines_direction(self, lines, rot_angles, angle_desk, thresh=0.5):
         lines_r = lines.reshape(lines.shape[0],4)
-        mask = (rot_angles>=angle_desk-abs(angle_desk))*(rot_angles<=angle_desk+abs(angle_desk)) # filtering the desired lines
+        mask = (rot_angles>=(angle_desk-thresh*abs(angle_desk)))*(rot_angles<=(angle_desk+thresh*abs(angle_desk))) # filtering the desired lines
         lines_candidates = lines_r[mask,:]
 
         lines_candidates = lines_candidates.reshape(lines_candidates.shape[0],1,lines_candidates.shape[1])
         return lines_candidates
     
-    def remove_outliers(self,lines_candidates):
+    def remove_outliers(self, lines_candidates, contamination=0.05):
         """
         Removing outlier lines (lines far from the text) using their y coordinates
         """
         X_train = lines_candidates[:,:,3]
-        clf = IsolationForest(max_samples=100,contamination=0.01) # consider 1% of the lines as outliers
+        clf = IsolationForest(max_samples=100, contamination=contamination) # consider 1% of the lines as outliers
         clf.fit(X_train)
         labels = clf.predict(X_train)
 
         lines_candidates = lines_candidates[labels!=-1] #removing outlier lines
         return lines_candidates
 
-    def _compute_distance(self,l):
+    def _compute_distance(self, l):
         """
         Compute the euclidian length of a line
         """
@@ -171,6 +169,9 @@ class Blind_image_adjustment():
     def find_perfect_rectangle(self):
         """
         Find a rectangle box from the given points
+        
+        Returns :
+        - x_max, x_min, y_max, y_min : Coordinates of the rectangle box surrounding the text
         """
         x = np.concatenate([self.lines_candidates_r[:,0],self.lines_candidates_r[:,2]])
         y = np.concatenate([self.lines_candidates_r[:,1],self.lines_candidates_r[:,3]])
@@ -184,6 +185,12 @@ class Blind_image_adjustment():
     def _compute_line_equation(self,l):
         """
         Compute the line equation from 2 points of a line
+        Arguments: 
+        - l : list containing the coordinates of two points from a line (x1,y1,x2,y2)
+        
+        Returns :
+        - a : slope of the line
+        - b : bias of the line
         """
         x1,y1,x2,y2 = l
         y1 = self.L - y1 # inverse y axis to start from 0 to L 
@@ -201,6 +208,9 @@ class Blind_image_adjustment():
     def compute_edge_lines(self):
         """
         Find the edge lines surrounding the text, for each line we apply a different logic(index_dict)
+        
+        Returns : 
+        - edge_lines : dictionnary containing as keys the name of the lines and as values two points from each line
         """
         greater = lambda a,b : a > b # returns a boolean value if a greater than b 
         smaller = lambda a,b : a < b # returns a boolean value if a smaller than b 
@@ -229,6 +239,7 @@ class Blind_image_adjustment():
                     }
         
         edge_lines = {}
+        early_break = False # break from the loop if the difference of coordinates between a line and another is too big compared to the difference at the previous iteration
         for direction in index_dict.keys():
             candidates = []
             lines = self.lines_candidates_r.copy()
@@ -237,18 +248,53 @@ class Blind_image_adjustment():
             line_type               = index_dict[direction]['line_type']
             sorting_function        = index_dict[direction]['sort_logic']
             mask                    = index_dict[direction]['mask']
+            
+            previous_pixel_diff = 0
+            previous_coord = lines[lines.argmin(axis=0)[coordinate_sorter_index],:][coordinate_sorter_index]
+            i = 0
+            threshold_break = 10
+            
+            
             while len(lines)>0: 
                 first_line = lines[sorting_function(lines,axis=0)[coordinate_sorter_index],:] # follow the line that has the max coordinate
+                
+                pixel_diff_new = abs(first_line[coordinate_sorter_index] - previous_coord) 
+                
+                if early_break:
+                    if direction == 'top_horizontal' and i>=2 and pixel_diff_new > threshold_break*previous_pixel_diff :
+                        print('breaking at i=',i)
+                        break
+
                 candidates.append(first_line)
                 
                 lines = lines[mask(lines[:,edge_coordinate_index],first_line[edge_coordinate_index])]
+                previous_coord = first_line[coordinate_sorter_index]
+                previous_pixel_diff = pixel_diff_new.copy()
+                i+=1
+
             candidates = np.array(candidates).reshape(len(candidates),1,4)  
+
+            # candidates = self._get_dominant_line(candidates,coordinate_sorter_index,edge_coordinate_index) # cluster points using DBSCAN and get the dominant cluster
             edge_lines[direction] = self._fit_line(candidates[:,:,coordinate_sorter_index],
                                               candidates[:,:,edge_coordinate_index],
                                               line_type
                                              )
         return edge_lines
-            
+    
+    def _get_dominant_line(self,candidates,coordinate_sorter_index,edge_coordinate_index):
+  
+        x = candidates[:,:,coordinate_sorter_index]
+        y = candidates[:,:,edge_coordinate_index]
+        X = np.append(y,x , axis=1)
+
+        clustering = DBSCAN(eps=100, min_samples=5).fit(X)
+        labels = clustering.labels_
+        val_count_df = pd.DataFrame(labels).value_counts()
+
+        label_with_max_values = val_count_df.idxmax()[0]
+        candidates_dominant = candidates[labels == label_with_max_values]
+        return candidates_dominant
+
     def _fit_line(self,X,Y,line_type): 
         """
         Fits a robust line (robust to outliers) using RANSAC Regressor and returns two points from the line
@@ -258,9 +304,9 @@ class Blind_image_adjustment():
         pred = model.predict(X).astype(int)
 
         if line_type == 'vertical':
-            model_line = np.array([X[0][0],pred[0][0],X[-1][0],pred[-1][0]])
+            model_line = np.array([X[0][0],pred[0][0],X[-1][0],pred[-1][0]]) #if vertical predict y coordinates
         elif line_type == 'horizontal':
-            model_line = np.array([pred[0][0],X[0][0],pred[-1][0],X[-1][0]])
+            model_line = np.array([pred[0][0],X[0][0],pred[-1][0],X[-1][0]]) # if horizontal predict x coordinates
         else : 
             raise ValueError("Argument line_type only takes the values 'horizontal' and 'vertical'")
         
@@ -270,6 +316,15 @@ class Blind_image_adjustment():
     def _compute_intersection(self,b1,b2,a1,a2):
         """
         Computes the cartesian intersection coordinates of two lines given their slope and bias
+        Arguments : 
+        - b1 : bias of the first line
+        - b2 : bias of the second line
+        - a1 : slope of the first line
+        - a2 : slope of the second line
+        
+        Returns : 
+        - x_inter : x coordinate of the intersection point
+        - y_inter : y coordinate of the intersection point
         """
         x_inter = (b1-b2)/(a2-a1)
         y_inter = self.L - int(a2*x_inter + b2)
@@ -279,6 +334,14 @@ class Blind_image_adjustment():
     def find_corners(self,edge_lines):
         """
         Finds the intersection of the 4 surrounding lines (corner points)
+        Arguments : 
+        - edge_lines : dictionnary containing as keys the name of the lines and as values two points from each line
+        
+        Returns : 
+        - corners : list containing the coordinates of the corners of the text (x_top_left,y_top_left,   
+                                                                                x_low_left,y_low_left,   
+                                                                                x_top_right,y_top_right,  
+                                                                                x_low_right,y_low_right)
         """
         a_m_lh,b_m_lh = self._compute_line_equation(edge_lines['low_horizontal']) # low horizontal line
         a_m_lv,b_m_lv = self._compute_line_equation(edge_lines['left_vertical']) # left vertical line
@@ -296,9 +359,14 @@ class Blind_image_adjustment():
                         x_low_right,y_low_right]
         return self.corners        
         
-    def adjust_image(self,buffer=100):
+    def adjust_image(self,margin=100):
         """
         Adjust a line using the homography transformation
+        Arguments : 
+        - margin : margin of the text in the image, default = 100
+        
+        Returns : 
+        - im_out : Image result after adjustment
         """
         dest = np.array([(self.x_min,self.y_min),
                          (self.x_min,self.y_max),
@@ -313,16 +381,18 @@ class Blind_image_adjustment():
                  (x_low_right,y_low_right)
                 ])
         
-        h, status = cv2.findHomography(src, dest,cv2.RANSAC, 5.0)
+        h, _ = cv2.findHomography(src, dest,cv2.RANSAC, 5.0)
         
-        x_border_min,x_border_max = (min(x_top_left,x_low_left,x_top_right,x_low_right)-buffer,
-                                    max(x_top_left,x_low_left,x_top_right,x_low_right)+buffer)
-        y_border_min,y_border_max = (min(y_top_left,y_low_left,y_top_right,y_low_right)-buffer,
-                                    max(y_top_left,y_low_left,y_top_right,y_low_right)+buffer)
+        # x_border_min,x_border_max = (min(x_top_left,x_low_left,x_top_right,x_low_right)-margin,
+        #                             max(x_top_left,x_low_left,x_top_right,x_low_right)+margin)
+        # y_border_min,y_border_max = (min(y_top_left,y_low_left,y_top_right,y_low_right)-margin,
+        #                             max(y_top_left,y_low_left,y_top_right,y_low_right)+margin)
             
-        im_out = cv2.warpPerspective(self.image[y_border_min:y_border_max,x_border_min:x_border_max],
-                                     h,(2*buffer + self.x_max-self.x_min, 2*buffer + self.y_max-self.y_min))
+        # im_out = cv2.warpPerspective(self.image[y_border_min:y_border_max,x_border_min:x_border_max],
+        #                              h,(2*margin + self.x_max-self.x_min, 2*margin + self.y_max-self.y_min))
 
+        im_out = cv2.warpPerspective(self.image,h,(self.image.shape[1], self.image.shape[0]))
+        im_out = im_out[self.y_min-margin:self.y_max+margin,self.x_min-margin:self.x_max+margin]
         return im_out
         
         
@@ -340,3 +410,58 @@ class Blind_image_adjustment():
 
         
 
+
+    # def compute_edge_lines(self):
+    #     """
+    #     Find the edge lines surrounding the text, for each line we apply a different logic(index_dict)
+        
+    #     Returns : 
+    #     - edge_lines : dictionnary containing as keys the name of the lines and as values two points from each line
+    #     """
+    #     greater = lambda a,b : a > b # returns a boolean value if a greater than b 
+    #     smaller = lambda a,b : a < b # returns a boolean value if a smaller than b 
+        
+    #     # each type of line has some particular caracteristics which we define in the following dictionnary
+    #     index_dict = {'right_vertical':{'coordinate_sorter_index':2,
+    #                                     'edge_coordinate_index':3,
+    #                                     'line_type':'vertical',
+    #                                     'sort_logic':np.argmax,
+    #                                     'mask':smaller},
+    #                   'top_horizontal':{'coordinate_sorter_index':3,
+    #                                     'edge_coordinate_index':2,
+    #                                     'line_type':'horizontal',
+    #                                     'sort_logic':np.argmin,
+    #                                     'mask':smaller},
+    #                   'left_vertical':{'coordinate_sorter_index':0,
+    #                                    'edge_coordinate_index':1,
+    #                                    'line_type':'vertical',
+    #                                    'sort_logic':np.argmin,
+    #                                    'mask':greater},
+    #                   'low_horizontal':{'coordinate_sorter_index':1,
+    #                                     'edge_coordinate_index':0,
+    #                                     'line_type':'horizontal',
+    #                                     'sort_logic':np.argmax,
+    #                                     'mask':greater}
+    #                 }
+        
+    #     edge_lines = {}
+    #     for direction in index_dict.keys():
+    #         candidates = []
+    #         lines = self.lines_candidates_r.copy()
+    #         coordinate_sorter_index = index_dict[direction]['coordinate_sorter_index']
+    #         edge_coordinate_index   = index_dict[direction]['edge_coordinate_index']
+    #         line_type               = index_dict[direction]['line_type']
+    #         sorting_function        = index_dict[direction]['sort_logic']
+    #         mask                    = index_dict[direction]['mask']
+    #         while len(lines)>0: 
+    #             first_line = lines[sorting_function(lines,axis=0)[coordinate_sorter_index],:] # follow the line that has the max coordinate
+    #             candidates.append(first_line)
+                
+    #             lines = lines[mask(lines[:,edge_coordinate_index],first_line[edge_coordinate_index])]
+    #         candidates = np.array(candidates).reshape(len(candidates),1,4)  
+    #         edge_lines[direction] = self._fit_line(candidates[:,:,coordinate_sorter_index],
+    #                                           candidates[:,:,edge_coordinate_index],
+    #                                           line_type
+    #                                          )
+    #     return edge_lines
+            
