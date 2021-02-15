@@ -90,9 +90,8 @@ class Preprocess():
         angles = np.array(angles)
 
         #converting angles to degree
-        angles_deg = np.rad2deg(angles)
-        return angles_deg
-
+        angles_deg_ = np.rad2deg(angles)
+        return angles_deg_
 
     def adjust_angles(self,angles_deg):
         """
