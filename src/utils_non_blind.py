@@ -10,8 +10,8 @@ class Preprocess():
         self.origin = origin
     
     def read_image(self):
-        img = cv2.imread(img)
-        origin = cv2.imread(origin)
+        img = cv2.imread(self.img)
+        origin = cv2.imread(self.origin)
         return img, origin
     
     def remove_shadows(self, img, origin):
@@ -80,6 +80,16 @@ class Image_adjustment():
         h, status = cv2.findHomography(np.array(src), np.array(dest),cv2.RANSAC, 5.0)
         im_out = cv2.warpPerspective(self.img,h,(self.origin.shape[1], self.origin.shape[0]))
         return im_out
-
+    
+    def _paint_black_areas(self, img):
+        """
+            Returns an image with convex black areas painted in white, this is because warpperspective returns some black areas    which are downgrading pytesseract performance
+        """
+        height, width, _ = img.shape
+        for x in range(0, height, 10):
+            for y in range(0, width, 10):
+                if img[max(0, y-5):min(height,y+5), max(0, x-5):min(width,x+5)].sum() == 0 : 
+                    img[max(0, y-5):min(height,y+5), max(0, x-5):min(width,x+5)] = [255, 255, 255]
+        return img
         
         

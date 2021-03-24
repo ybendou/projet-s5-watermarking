@@ -165,15 +165,20 @@ class Blind_image_adjustment():
         """
         return lines.reshape(lines.shape[0],4)
     
-    def find_perfect_rectangle(self):
+    def find_perfect_rectangle(self, x=None, y=None):
         """
         Find a rectangle box from the given points
         
         Returns :
         - x_max, x_min, y_max, y_min : Coordinates of the rectangle box surrounding the text
         """
-        x = np.concatenate([self.lines_candidates_r[:,0],self.lines_candidates_r[:,2]])
-        y = np.concatenate([self.lines_candidates_r[:,1],self.lines_candidates_r[:,3]])
+
+        if type(x)==np.ndarray and type(y)==np.ndarray:
+            pass
+        else: 
+            x = np.concatenate([self.lines_candidates_r[:,0],self.lines_candidates_r[:,2]])
+            y = np.concatenate([self.lines_candidates_r[:,1],self.lines_candidates_r[:,3]])
+        
         self.x_max      = x.max()
         self.x_min      = x.min()
         self.y_max      = y.max()
@@ -204,10 +209,12 @@ class Blind_image_adjustment():
         candidates = []
         
         
-    def compute_edge_lines(self):
+    def compute_edge_lines(self, dominant=True):
         """
         Find the edge lines surrounding the text, for each line we apply a different logic(index_dict)
-        
+        Arguments : 
+        - dominan : Boolean value to do a clustering of lines and pick the dominant one, default is equal to True 
+
         Returns : 
         - edge_lines : dictionnary containing as keys the name of the lines and as values two points from each line
         """
@@ -273,7 +280,7 @@ class Blind_image_adjustment():
 
             candidates = np.array(candidates).reshape(len(candidates),1,4)  
 
-            # candidates = self._get_dominant_line(candidates,coordinate_sorter_index,edge_coordinate_index) # cluster points using DBSCAN and get the dominant cluster
+            candidates = self._get_dominant_line(candidates,coordinate_sorter_index,edge_coordinate_index) # cluster points using DBSCAN and get the dominant cluster
             edge_lines[direction] = self._fit_line(candidates[:,:,coordinate_sorter_index],
                                               candidates[:,:,edge_coordinate_index],
                                               line_type
@@ -281,7 +288,9 @@ class Blind_image_adjustment():
         return edge_lines
     
     def _get_dominant_line(self,candidates,coordinate_sorter_index,edge_coordinate_index):
-  
+        """
+            Returns dominant line in case we have two or three lines in our border
+        """
         x = candidates[:,:,coordinate_sorter_index]
         y = candidates[:,:,edge_coordinate_index]
         X = np.append(y,x , axis=1)
@@ -330,12 +339,12 @@ class Blind_image_adjustment():
         x_inter = int(x_inter)
         return x_inter,y_inter
 
-    def find_corners(self,edge_lines):
+    def find_corners(self,edge_lines, do_assert=True):
         """
         Finds the intersection of the 4 surrounding lines (corner points)
         Arguments : 
         - edge_lines : dictionnary containing as keys the name of the lines and as values two points from each line
-        
+        - do_assert : run an assertion to check if methodology is working
         Returns : 
         - corners : list containing the coordinates of the corners of the text (x_top_left,y_top_left,   
                                                                                 x_low_left,y_low_left,   
@@ -352,12 +361,37 @@ class Blind_image_adjustment():
         x_low_left,y_low_left = self._compute_intersection(b_m_lv,b_m_lh,a_m_lv,a_m_lh)  
         x_top_right,y_top_right = self._compute_intersection(b_m_rv,b_m_th,a_m_rv,a_m_th) 
         x_low_right,y_low_right = self._compute_intersection(b_m_rv,b_m_lh,a_m_rv,a_m_lh) 
+
         self.corners = [x_top_left,y_top_left,   
                         x_low_left,y_low_left,   
                         x_top_right,y_top_right,  
                         x_low_right,y_low_right]
-        return self.corners        
-        
+
+        h,w = self.image.shape[:2]
+        if do_assert :
+            assert -20<=x_top_left<=w+20, f'Error, X top left should be between -20 and the image width + 20, got {x_top_left} instead '
+            assert -20<=x_low_left<=w+20, f'Error, X low left should be between -20 and the image width + 20, got {x_low_left} instead '
+            assert -20<=x_top_right<=w+20, f'Error, X top right should be between -20 and the image width + 20, got {x_top_right} instead '
+            assert -20<=x_low_right<=w+20, f'Error, X low right should be between -20 and the image width + 20, got {x_low_right} instead '
+
+            assert -20<=y_top_left<=h+20, f'Error, X top left should be between -20 and the image width + 20, got {y_top_left} instead '
+            assert -20<=y_low_left<=h+20, f'Error, X low left should be between -20 and the image width + 20, got {y_low_left} instead '
+            assert -20<=y_top_right<=h+20, f'Error, X top right should be between -20 and the image width + 20, got {y_top_right} instead '
+            assert -20<=y_low_right<=h+20, f'Error, X low right should be between -20 and the image width + 20, got {y_low_right} instead '
+
+
+        return self.corners    
+
+    def _paint_black_areas(self, img):
+        """
+            Returns an image with convex black areas painted in white, this is because warpperspective returns some black areas which are downgrading pytesseract performance
+        """
+        height, width, _ = img.shape
+        for x in range(0, height, 10):
+            for y in range(0, width, 10):
+                if img[max(0, y-5):min(height,y+5), max(0, x-5):min(width,x+5)].sum() == 0 : 
+                    img[max(0, y-5):min(height,y+5), max(0, x-5):min(width,x+5)] = [255, 255, 255]
+        return img    
     def adjust_image(self,margin=100):
         """
         Adjust a line using the homography transformation
@@ -367,33 +401,34 @@ class Blind_image_adjustment():
         Returns : 
         - im_out : Image result after adjustment
         """
+     
+                        
+        x_top_left, y_top_left, x_low_left, y_low_left, x_top_right, y_top_right, x_low_right,y_low_right = self.corners
+
+        x = np.array([x_top_left, x_low_left, x_top_right, x_low_right]) 
+        y = np.array([y_top_left, y_low_left, y_top_right, y_low_right])
+
+        _ = self.find_perfect_rectangle(x,y)
+
         dest = np.array([(self.x_min,self.y_min),
                          (self.x_min,self.y_max),
                          (self.x_max,self.y_min),
-                         (self.x_max,self.y_max)
-                        ])
-        x_top_left, y_top_left, x_low_left, y_low_left, x_top_right, y_top_right, x_low_right,y_low_right = self.corners
-        
+                         (self.x_max,self.y_max)])
+
         src =  np.array([(x_top_left,y_top_left),
                  (x_low_left,y_low_left),
                  (x_top_right,y_top_right),
                  (x_low_right,y_low_right)
                 ])
-        
         h, _ = cv2.findHomography(src, dest,cv2.RANSAC, 5.0)
-        
-        # x_border_min,x_border_max = (min(x_top_left,x_low_left,x_top_right,x_low_right)-margin,
-        #                             max(x_top_left,x_low_left,x_top_right,x_low_right)+margin)
-        # y_border_min,y_border_max = (min(y_top_left,y_low_left,y_top_right,y_low_right)-margin,
-        #                             max(y_top_left,y_low_left,y_top_right,y_low_right)+margin)
-            
-        # im_out = cv2.warpPerspective(self.image[y_border_min:y_border_max,x_border_min:x_border_max],
-        #                              h,(2*margin + self.x_max-self.x_min, 2*margin + self.y_max-self.y_min))
 
-        im_out = cv2.warpPerspective(self.image,h,(self.image.shape[1], self.image.shape[0]))
-        im_out = im_out[self.y_min-margin:self.y_max+margin,self.x_min-margin:self.x_max+margin]
+        im_out = cv2.warpPerspective(self.image,h,(self.image.shape[1], self.image.shape[0]),  borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+       
+        im_out = self._paint_black_areas(im_out)
+         
+        im_out = im_out[max(0,self.y_min-margin):max(0,self.y_max+margin),max(0,self.x_min-margin):max(0,self.x_max+margin)]
         return im_out
-        
+    
         
         
         
